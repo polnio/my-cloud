@@ -1,11 +1,20 @@
 use config::ConfigError;
+use std::collections::HashMap;
 #[cfg(feature = "webdav")]
 use std::path::PathBuf;
 
 #[derive(serde::Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub users: HashMap<String, UserConfig>,
     #[cfg(feature = "webdav")]
     pub webdav: WebdavConfig,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserConfig {
+    pub display_name: Option<String>,
+    pub password_file: PathBuf,
 }
 
 #[cfg(feature = "webdav")]
