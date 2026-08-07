@@ -2,5 +2,23 @@
 name = "my-cloud"
 version = "0.1.0"
 edition = "2024"
+authors = ["Po Co<me@polnio.dev>"]
 
 [dependencies]
+dav-server = { version = "0.11.0", optional = true }
+hyper = { version = "1.11.0", optional = true }
+hyper-util = { version = "0.1.20", optional = true }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+[features]
+default = ["dav"]
+dav = [
+  "dep:dav-server",
+
+  "dep:hyper",
+  "hyper/server",
+  "hyper/http1",
+
+  "dep:hyper-util",
+  "hyper-util/tokio"
+]
