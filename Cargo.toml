@@ -11,8 +11,8 @@ hyper-util = { version = "0.1.20", optional = true }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 
 [features]
-default = ["dav"]
-dav = [
+default = ["webdav"]
+webdav = [
   "dep:dav-server",
 
   "dep:hyper",
