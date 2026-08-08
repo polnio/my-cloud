@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default)]
     pub users: HashMap<String, UserConfig>,
+    #[serde(default)]
+    pub groups: HashMap<String, GroupConfig>,
     #[cfg(feature = "webdav")]
     pub webdav: WebdavConfig,
 }
@@ -15,6 +17,12 @@ pub struct Config {
 pub struct UserConfig {
     pub display_name: Option<String>,
     pub password_file: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+pub struct GroupConfig {
+    pub display_name: Option<String>,
+    pub users: Vec<String>,
 }
 
 #[cfg(feature = "webdav")]
