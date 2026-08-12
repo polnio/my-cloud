@@ -6,12 +6,25 @@ mod state;
 
 use crate::args::Args;
 use crate::config::Config;
+use crate::state::StateHandle;
 use anyhow::Context as _;
 use std::sync::Arc;
 use tokio::select;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let result = tracing::subscriber::set_global_default(
+        FmtSubscriber::builder()
+            .with_max_level(Level::DEBUG)
+            .finish(),
+    )
+    .context("Failed to set global default subscriber");
+    if let Err(err) = result {
+        eprintln!("{:?}", err);
+    }
+
     let args = Args::parse();
     let config = {
         let path = args
@@ -28,12 +41,12 @@ async fn main() -> anyhow::Result<()> {
         Config::parse(&path).context("Failed to parse config")?
     };
     let config = Arc::new(config);
-    let state = Default::default();
+    let state = StateHandle::default();
 
     #[cfg(feature = "webdav")]
     let webdav = services::webdav::serve(config, state);
     #[cfg(not(feature = "webdav"))]
-    let webdav = std::future::pending::<()>();
+    let webdav = std::future::pending::<anyhow::Result<()>>();
 
     let ctrl_c = tokio::signal::ctrl_c();
 

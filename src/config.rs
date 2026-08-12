@@ -1,6 +1,5 @@
 use config::ConfigError;
 use std::collections::HashMap;
-#[cfg(feature = "webdav")]
 use std::path::PathBuf;
 
 #[derive(serde::Deserialize)]
