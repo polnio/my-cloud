@@ -40,6 +40,7 @@ pub async fn serve(config: Arc<Config>, state: StateHandle) -> std::io::Result<(
 
     let router = Dispatcher::new()
         .get(handle_get)
+        .head(handle_head)
         .propfind(handle_propfind)
         .options(handle_options)
         .dispatch();
@@ -60,49 +61,19 @@ async fn handle_get(
     auth: Auth,
     opath: Option<Path<String>>,
 ) -> Response {
-    let path = if let Some(Path(p)) = opath {
-        Cow::Owned(state.config.webdav.root.join(p))
-    } else {
-        Cow::Borrowed(state.config.webdav.root.as_path())
-    };
-    let meta = match path.metadata() {
+    let path = get_real_path(opath, &state.config);
+    let meta = match get_meta(&path) {
         Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        Err(err) => {
-            tracing::error!("Failed to get metadata for {}: {}", path.display(), err);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+        Err(status) => return status.into_response(),
     };
     if meta.is_file() {
-        let mime = mime_guess::from_path(path.as_ref());
-        let mime = match mime.count() {
-            1 => Some(mime.first().unwrap().to_string()),
-            _ => None,
-        };
-        let file = tokio::fs::File::open(path.as_ref()).await.unwrap();
-        let stream = ReaderStream::new(file);
-        let body = Body::from_stream(stream);
-        (
-            StatusCode::OK,
-            [
-                (
-                    "Content-Type",
-                    mime.unwrap_or_else(|| "application/octet-stream".to_owned()),
-                ),
-                ("Content-Length", meta.len().to_string()),
-                // (
-                //     "Content-Disposition",
-                //     format!(
-                //         "attachment; filename=\"{}\"",
-                //         path.file_name().unwrap().to_string_lossy()
-                //     ),
-                // ),
-            ],
-            body,
-        )
-            .into_response()
+        let props = protocol::propfind::get_props(&path);
+        let mut headers = HeaderMap::new();
+        let body = Body::from_stream(ReaderStream::new(
+            tokio::fs::File::open(path.as_ref()).await.unwrap(),
+        ));
+        set_headers(&meta, &props, &mut headers);
+        (StatusCode::OK, headers, body).into_response()
     } else if meta.is_dir() {
         // https://github.com/nginx/nginx/blob/master/src/http/modules/ngx_http_autoindex_module.c
         let rel_path =
@@ -182,6 +153,26 @@ async fn handle_get(
     }
 }
 
+async fn handle_head(
+    State(state): State<WebDavState>,
+    _auth: Auth,
+    opath: Option<Path<String>>,
+) -> Response {
+    let path = get_real_path(opath, &state.config);
+    let meta = match get_meta(&path) {
+        Ok(meta) => meta,
+        Err(status) => return status.into_response(),
+    };
+    if meta.is_file() {
+        let props = protocol::propfind::get_props(&path);
+        let mut headers = HeaderMap::new();
+        set_headers(&meta, &props, &mut headers);
+        (StatusCode::OK, headers).into_response()
+    } else {
+        (StatusCode::OK, [("Content-Type", "text/html")]).into_response()
+    }
+}
+
 async fn handle_options() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -202,11 +193,7 @@ async fn handle_propfind(
     opath: Option<Path<String>>,
     body: Bytes,
 ) -> Response {
-    let path = if let Some(Path(p)) = opath {
-        Cow::Owned(state.config.webdav.root.join(p))
-    } else {
-        Cow::Borrowed(state.config.webdav.root.as_path())
-    };
+    let path = get_real_path(opath, &state.config);
     let Ok(depth) = headers
         .get("DEPTH")
         .map(|d| {
@@ -285,6 +272,50 @@ async fn handle_propfind(
         body,
     )
         .into_response()
+}
+
+fn get_real_path(path: Option<Path<String>>, config: &Config) -> Cow<'_, std::path::Path> {
+    if let Some(Path(p)) = path {
+        Cow::Owned(config.webdav.root.join(p))
+    } else {
+        Cow::Borrowed(config.webdav.root.as_path())
+    }
+}
+
+fn get_meta(path: &std::path::Path) -> Result<std::fs::Metadata, StatusCode> {
+    path.metadata().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            StatusCode::NOT_FOUND
+        } else {
+            tracing::error!("Failed to get metadata for {}: {}", path.display(), err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })
+}
+
+fn set_headers(
+    meta: &std::fs::Metadata,
+    props: &protocol::propfind::Metadata,
+    headers: &mut HeaderMap,
+) {
+    if let Some(last_modified) = props.modified_date() {
+        headers.insert(
+            "Last-Modified",
+            chrono::DateTime::<chrono::Utc>::from(last_modified)
+                .to_rfc2822()
+                .parse()
+                .unwrap(),
+        );
+    }
+    headers.insert(
+        "Content-Type",
+        props
+            .mime()
+            .unwrap_or_else(|| "application/octet-stream")
+            .parse()
+            .unwrap(),
+    );
+    headers.insert("Content-Length", meta.len().to_string().parse().unwrap());
 }
 
 #[debug_middleware]

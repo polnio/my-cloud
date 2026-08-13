@@ -19,7 +19,7 @@ pub struct Metadata {
 }
 
 bitflags! {
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct Kind: u8 {
         const COLLECTION = 1 << 0;
         const PRINCIPAL  = 1 << 1;
@@ -57,6 +57,30 @@ impl From<std::fs::Metadata> for InnerMetadata {
 }
 
 impl Metadata {
+    #[allow(dead_code)]
+    pub fn creation_date(&self) -> Option<SystemTime> {
+        self.creation_date
+    }
+    #[allow(dead_code)]
+    pub fn modified_date(&self) -> Option<SystemTime> {
+        self.modified_date
+    }
+    #[allow(dead_code)]
+    pub fn size(&self) -> Option<u64> {
+        self.size
+    }
+    #[allow(dead_code)]
+    pub fn kind(&self) -> Option<Kind> {
+        self.kind
+    }
+    #[allow(dead_code)]
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+    #[allow(dead_code)]
+    pub fn mime(&self) -> Option<&str> {
+        self.mime.as_deref()
+    }
     pub fn set_is_root(&mut self) {
         self.display_name = None;
     }
