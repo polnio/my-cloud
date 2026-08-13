@@ -43,6 +43,9 @@ impl FromRequestParts<WebDavState> for Auth {
         // TODO: Support non-Unix platforms
         let path = Path::new(OsStr::from_bytes(path.as_ref()));
         if is_path_related_to_user(&*path, username, &state.config).is_none() {
+            if parts.method == axum::http::method::Method::PUT {
+                return Err(StatusCode::CONFLICT);
+            }
             return Err(StatusCode::NOT_FOUND);
         }
 

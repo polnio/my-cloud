@@ -15,6 +15,7 @@ use axum::{Router, debug_middleware};
 use dispatcher::Dispatcher;
 use itertools::Itertools as _;
 use std::borrow::Cow;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -41,6 +42,11 @@ pub async fn serve(config: Arc<Config>, state: StateHandle) -> std::io::Result<(
     let router = Dispatcher::new()
         .get(handle_get)
         .head(handle_head)
+        .put(handle_put)
+        .delete(handle_delete)
+        .mkcol(handle_mkcol)
+        .copy(handle_copy)
+        .r#move(handle_move)
         .propfind(handle_propfind)
         .options(handle_options)
         .dispatch();
@@ -173,17 +179,188 @@ async fn handle_head(
     }
 }
 
-async fn handle_options() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [
-            (
-                "ALLOW",
-                "GET,HEAD,PUT,DELETE,MKCOL,COPY,MOVE,PROPFIND,OPTIONS,LOCK,UNLOCK",
-            ),
-            ("DAV", "1"),
-        ],
-    )
+async fn handle_put(
+    State(state): State<WebDavState>,
+    opath: Option<Path<String>>,
+    _auth: Auth,
+    body: Bytes,
+) -> impl IntoResponse {
+    let path = get_real_path(opath, &state.config);
+    if path_depth(&path, &state.config) < 2 {
+        return StatusCode::FORBIDDEN;
+    }
+    if path.is_dir() {
+        return StatusCode::BAD_REQUEST;
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::error!(
+                "Failed to create/open file {path:?}: {err}",
+                path = path.display()
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+    eprintln!("{:?}", String::from_utf8_lossy(&body));
+    if let Err(err) = file.write_all(&body) {
+        tracing::error!(
+            "Failed to write to file {path:?}: {err}",
+            path = path.display()
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    StatusCode::OK
+}
+
+async fn handle_delete(
+    State(state): State<WebDavState>,
+    _auth: Auth,
+    opath: Option<Path<String>>,
+) -> impl IntoResponse {
+    let path = get_real_path(opath, &state.config);
+    if path_depth(&path, &state.config) < 2 {
+        return StatusCode::FORBIDDEN;
+    }
+    let result = if path.is_dir() {
+        std::fs::remove_dir_all(&path)
+    } else {
+        std::fs::remove_file(&path)
+    };
+    if let Err(err) = result {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => return StatusCode::NOT_FOUND,
+            _ => {
+                tracing::error!(
+                    "Failed to delete file {path:?}: {err}",
+                    path = path.display()
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
+    StatusCode::NO_CONTENT
+}
+
+async fn handle_mkcol(
+    State(state): State<WebDavState>,
+    _auth: Auth,
+    opath: Option<Path<String>>,
+) -> impl IntoResponse {
+    let path = get_real_path(opath, &state.config);
+    if path_depth(&path, &state.config) < 2 {
+        return StatusCode::FORBIDDEN;
+    }
+    if let Err(err) = std::fs::create_dir(&path) {
+        match err.kind() {
+            std::io::ErrorKind::AlreadyExists => return StatusCode::METHOD_NOT_ALLOWED,
+            std::io::ErrorKind::NotFound => return StatusCode::CONFLICT,
+            std::io::ErrorKind::StorageFull => return StatusCode::INSUFFICIENT_STORAGE,
+            _ => {
+                tracing::error!(
+                    "Failed to create directory {path:?}: {err}",
+                    path = path.display()
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
+    StatusCode::CREATED
+}
+
+async fn handle_copy(
+    State(state): State<WebDavState>,
+    auth: Auth,
+    opath: Option<Path<String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let (src_path, dest_path) = match prepare_copy_move(&state, &auth, opath, &headers) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+    let result = if src_path.is_dir() {
+        let mut result = Ok(());
+        for entry in walkdir::WalkDir::new(&src_path) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to walk directory {src_path:?}: {err}",
+                        src_path = src_path.display()
+                    );
+                    if let Some(err) = err.into_io_error() {
+                        result = Err(err);
+                    }
+                    break;
+                }
+            };
+            let path = entry.path();
+            let new_path = dest_path.join(path.strip_prefix(&src_path).unwrap());
+            if path.is_dir() {
+                if let Err(err) = std::fs::create_dir(new_path) {
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        result = Err(err);
+                        break;
+                    }
+                }
+            } else {
+                if let Err(err) = std::fs::copy(path, new_path) {
+                    result = Err(err);
+                    break;
+                }
+            }
+        }
+        result
+    } else {
+        std::fs::copy(&src_path, &dest_path).map(|_| ())
+    };
+    if let Err(err) = result {
+        match err.kind() {
+            std::io::ErrorKind::StorageFull => return StatusCode::INSUFFICIENT_STORAGE,
+            _ => {
+                tracing::error!(
+                    "Failed to copy file {src_path:?} to {dest_path:?}: {err}",
+                    src_path = src_path.display(),
+                    dest_path = dest_path.display()
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
+    StatusCode::CREATED
+}
+
+async fn handle_move(
+    State(state): State<WebDavState>,
+    auth: Auth,
+    opath: Option<Path<String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let (src_path, dest_path) = match prepare_copy_move(&state, &auth, opath, &headers) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+
+    if let Err(err) = std::fs::rename(&src_path, &dest_path) {
+        match err.kind() {
+            std::io::ErrorKind::StorageFull => return StatusCode::INSUFFICIENT_STORAGE,
+            _ => {
+                tracing::error!(
+                    "Failed to move file {src_path:?} to {dest_path:?}: {err}",
+                    src_path = src_path.display(),
+                    dest_path = dest_path.display()
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
+
+    StatusCode::CREATED
 }
 
 async fn handle_propfind(
@@ -274,6 +451,13 @@ async fn handle_propfind(
         .into_response()
 }
 
+async fn handle_options() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("ALLOW", dispatcher::METHODS), ("DAV", "1")],
+    )
+}
+
 fn get_real_path(path: Option<Path<String>>, config: &Config) -> Cow<'_, std::path::Path> {
     if let Some(Path(p)) = path {
         Cow::Owned(config.webdav.root.join(p))
@@ -318,6 +502,13 @@ fn set_headers(
     headers.insert("Content-Length", meta.len().to_string().parse().unwrap());
 }
 
+fn path_depth(path: &std::path::Path, config: &Config) -> usize {
+    path.strip_prefix(&config.webdav.root)
+        .unwrap()
+        .iter()
+        .count()
+}
+
 #[debug_middleware]
 async fn handle_response_headers(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
@@ -325,6 +516,54 @@ async fn handle_response_headers(req: Request, next: Next) -> Response {
         .headers_mut()
         .insert("Connection", HeaderValue::from_static("keep-alive"));
     response
+}
+
+fn prepare_copy_move<'a>(
+    state: &'a WebDavState,
+    auth: &Auth,
+    opath: Option<Path<String>>,
+    headers: &HeaderMap,
+) -> Result<(Cow<'a, std::path::Path>, std::path::PathBuf), StatusCode> {
+    let Some(mut dest) = headers.get("Destination").and_then(|h| h.to_str().ok()) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let parse = dest.parse::<axum::http::Uri>();
+    if let Ok(uri) = &parse {
+        dest = uri.path();
+    }
+    eprintln!("{dest}");
+    let Some((_, dest)) =
+        auth::is_path_related_to_user(dest.as_ref(), auth.username(), &state.config)
+    else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    let dest = dest.strip_prefix("/").unwrap_or(dest.as_ref());
+    let overwrite = headers.get("Overwrite").and_then(|h| h.to_str().ok());
+    let src_path = get_real_path(opath, &state.config);
+    let mut dest_path = state.config.webdav.root.join(dest);
+    if src_path.is_file() && dest_path.is_dir() {
+        dest_path = dest_path.join(src_path.file_name().unwrap());
+    }
+    dbg!(&src_path, &dest_path);
+    if path_depth(&src_path, &state.config) < 2 {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if path_depth(&dest_path, &state.config) < 2 {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if src_path == dest_path {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if !src_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if !dest_path.parent().is_some_and(|p| p.exists()) {
+        return Err(StatusCode::CONFLICT);
+    }
+    if overwrite == Some("F") && dest_path.exists() {
+        return Err(StatusCode::PRECONDITION_FAILED);
+    }
+    Ok((src_path, dest_path))
 }
 
 #[derive(Clone)]
