@@ -40,7 +40,7 @@ pub fn method_dispatcher(input: TokenStream) -> TokenStream {
     let methods_str = methods.iter().map(ToString::to_string);
 
     let mhs = methods.iter().enumerate().map(|(i, method)| {
-        let name = format_ident!("{}", method.to_string().to_lowercase());
+        let name = format_ident!("r#{}", method.to_string().to_lowercase());
         let t = Ident::new("T", Span::call_site().into());
         let tt = Ident::new("TT", Span::call_site().into());
         let handler = Ident::new("handler", Span::call_site().into());
