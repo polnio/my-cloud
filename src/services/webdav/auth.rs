@@ -42,7 +42,7 @@ impl FromRequestParts<WebDavState> for Auth {
         let path = super::util::decode_uri(parts.uri.path());
         // TODO: Support non-Unix platforms
         let path = Path::new(OsStr::from_bytes(path.as_ref()));
-        if is_path_related_to_user(&*path, username, &state.config).is_none() {
+        if is_path_related_to_user(path, username, &state.config).is_none() {
             if parts.method == axum::http::method::Method::PUT {
                 return Err(StatusCode::CONFLICT);
             }
@@ -59,7 +59,7 @@ fn check_auth(
     username: &str,
     password: &str,
 ) -> Result<(), StatusCode> {
-    if app_state.creds.get(username).map(|s| s.as_str()) == Some(&password) {
+    if app_state.creds.get(username).map(|s| s.as_str()) == Some(password) {
         return Ok(());
     }
     let Some(password_file) = config.users.get(username).map(|u| &u.password_file) else {
@@ -72,9 +72,9 @@ fn check_auth(
                 .insert(username.to_owned(), password.to_owned());
             Ok(())
         }
-        Ok(false) => return Err(StatusCode::UNAUTHORIZED),
+        Ok(false) => Err(StatusCode::UNAUTHORIZED),
         // TODO: Handle error
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 

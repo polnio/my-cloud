@@ -7,7 +7,7 @@ const NS_DAV: &str = "DAV:";
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     #[error("XML error: {0}")]
-    XML(#[from] xml::reader::Error),
+    Xml(#[from] xml::reader::Error),
     #[error("Expected start element {name}")]
     ExpectedStartElement { name: &'static str },
     #[error("Expected end element {name}")]

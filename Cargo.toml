@@ -17,6 +17,7 @@ argon2 = { version = "0.5.3", features = ["std"] }
 clap = { version = "4.6.6", features = ["derive"] }
 config = { version = "0.15.25", default-features = false, features = ["toml"] }
 dirs = "6.0.0"
+itertools = "0.15.0"
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1.44"
@@ -26,7 +27,6 @@ axum = { version = "0.8.9", default-features = false, optional = true }
 bitflags = { version = "2.13.1", optional = true }
 chrono = { version = "0.4.45", optional = true }
 headers = { version = "0.4.1", optional = true }
-itertools = { version = "0.15.0", optional = true }
 mime_guess = { version = "2.0.5", optional = true }
 thiserror = { version = "2.0.20", optional = true }
 tokio-util = { version = "0.7.19", optional = true }
@@ -46,7 +46,6 @@ webdav = [
   "dep:bitflags",
   "dep:chrono",
   "dep:headers",
-  "dep:itertools",
   "dep:mime_guess",
   "dep:thiserror",
 

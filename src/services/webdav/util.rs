@@ -7,10 +7,10 @@ use std::{
 
 pub fn decode_uri(uri: &'_ str) -> Cow<'_, [u8]> {
     let pcts = uri.chars().positions(|c| c == '%').collect_vec();
-    if pcts.len() == 0 {
+    if pcts.is_empty() {
         return Cow::Borrowed(uri.as_bytes());
     }
-    let mut decoded = Vec::with_capacity(uri.as_bytes().len() - 2 * pcts.len());
+    let mut decoded = Vec::with_capacity(uri.len() - 2 * pcts.len());
     let mut uri = uri;
     for pct in pcts {
         let (before, after) = uri.split_at(pct);
@@ -31,9 +31,12 @@ pub fn decode_uri(uri: &'_ str) -> Cow<'_, [u8]> {
 pub fn encode_uri(uri: &'_ str, encode_slashes: bool) -> String {
     let mut encoded = String::with_capacity(uri.len());
     for byte in uri.bytes() {
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'.' {
-            encoded.push(byte as char);
-        } else if !encode_slashes && byte == b'/' {
+        if byte.is_ascii_alphanumeric()
+            || byte == b'-'
+            || byte == b'_'
+            || byte == b'.'
+            || (!encode_slashes && byte == b'/')
+        {
             encoded.push(byte as char);
         } else {
             encoded.push('%');

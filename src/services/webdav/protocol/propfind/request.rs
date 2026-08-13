@@ -115,7 +115,7 @@ fn expect_start_document(event: &XmlEvent) -> Result<(), Error> {
 
 fn expect_end_document(event: &XmlEvent) -> Result<(), Error> {
     match event {
-        XmlEvent::EndDocument { .. } => Ok(()),
+        XmlEvent::EndDocument => Ok(()),
         _ => Err(Error::ExpectedEndElement { name: "Document" }),
     }
 }
@@ -127,7 +127,7 @@ fn expect_start_element(event: &XmlEvent, tag_name: &'static str) -> Result<(), 
         {
             Ok(())
         }
-        _ => return Err(Error::ExpectedStartElement { name: tag_name }),
+        _ => Err(Error::ExpectedStartElement { name: tag_name }),
     }
 }
 
@@ -138,7 +138,7 @@ fn expect_end_element(event: &XmlEvent, tag_name: &'static str) -> Result<(), Er
         {
             Ok(())
         }
-        _ => return Err(Error::ExpectedEndElement { name: tag_name }),
+        _ => Err(Error::ExpectedEndElement { name: tag_name }),
     }
 }
 

@@ -302,11 +302,11 @@ async fn handle_copy(
             let path = entry.path();
             let new_path = dest_path.join(path.strip_prefix(&src_path).unwrap());
             if path.is_dir() {
-                if let Err(err) = std::fs::create_dir(new_path) {
-                    if err.kind() != std::io::ErrorKind::NotFound {
-                        result = Err(err);
-                        break;
-                    }
+                if let Err(err) = std::fs::create_dir(new_path)
+                    && err.kind() != std::io::ErrorKind::NotFound
+                {
+                    result = Err(err);
+                    break;
                 }
             } else {
                 if let Err(err) = std::fs::copy(path, new_path) {
@@ -414,11 +414,8 @@ async fn handle_propfind(
             let path = item.path();
             let rel_path =
                 PathBuf::from("/").join(path.strip_prefix(&state.config.webdav.root).unwrap());
-            let Some((dn, rel_path)) =
-                auth::is_path_related_to_user(&rel_path, auth.username(), &state.config)
-            else {
-                return None;
-            };
+            let (dn, rel_path) =
+                auth::is_path_related_to_user(&rel_path, auth.username(), &state.config)?;
             let mut meta = protocol::propfind::get_props(path);
             if path == state.config.webdav.root {
                 meta.set_is_root();
@@ -495,7 +492,7 @@ fn set_headers(
         "Content-Type",
         props
             .mime()
-            .unwrap_or_else(|| "application/octet-stream")
+            .unwrap_or("application/octet-stream")
             .parse()
             .unwrap(),
     );

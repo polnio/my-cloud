@@ -27,7 +27,7 @@ bitflags! {
 }
 
 impl Kind {
-    fn to_xml(&self) -> String {
+    fn to_xml(self) -> String {
         self.iter()
             .map(|kind| match kind {
                 Self::COLLECTION => "<collection/>",
@@ -50,7 +50,7 @@ impl From<std::fs::Metadata> for InnerMetadata {
         Self {
             creation_date: value.created().ok(),
             modified_date: value.modified().ok(),
-            size: value.is_file().then(|| value.len()),
+            size: value.is_file().then_some(value.len()),
             kind: Some(value.file_type()),
         }
     }
