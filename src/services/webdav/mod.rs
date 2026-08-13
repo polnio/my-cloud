@@ -291,14 +291,3 @@ struct WebDavState {
     app_state: StateHandle,
     config: Arc<Config>,
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn aboba() {
-        let items = walkdir::WalkDir::new("/aboba")
-            .into_iter()
-            .collect::<Vec<_>>();
-        println!("{items:?}");
-    }
-}
