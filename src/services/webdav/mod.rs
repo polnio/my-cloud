@@ -6,12 +6,12 @@ mod util;
 use crate::config::Config;
 use crate::state::StateHandle;
 use auth::{Auth, handle_unauthenticated};
-use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::from_fn;
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::{Next, from_fn};
 use axum::response::{IntoResponse, Response};
+use axum::{Router, debug_middleware};
 use dispatcher::Dispatcher;
 use itertools::Itertools as _;
 use std::borrow::Cow;
@@ -47,6 +47,7 @@ pub async fn serve(config: Arc<Config>, state: StateHandle) -> std::io::Result<(
         .route("/", router.clone())
         .route("/{*path}", router)
         .layer(from_fn(handle_unauthenticated))
+        .layer(from_fn(handle_response_headers))
         .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
         .with_state(state);
 
@@ -284,6 +285,15 @@ async fn handle_propfind(
         body,
     )
         .into_response()
+}
+
+#[debug_middleware]
+async fn handle_response_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    response
+        .headers_mut()
+        .insert("Connection", HeaderValue::from_static("keep-alive"));
+    response
 }
 
 #[derive(Clone)]
