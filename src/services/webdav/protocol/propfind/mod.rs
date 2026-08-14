@@ -5,6 +5,7 @@ use super::{Error, NS_DAV};
 use bitflags::bitflags;
 use std::ffi::OsStr;
 use std::fs::FileType;
+use std::hash::{DefaultHasher, Hasher};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -16,6 +17,7 @@ pub struct Metadata {
     kind: Option<Kind>,
     display_name: Option<String>,
     mime: Option<String>,
+    etag: Option<String>,
 }
 
 bitflags! {
@@ -108,6 +110,18 @@ pub fn get_props(path: impl AsRef<Path>) -> Metadata {
         None
     };
 
+    // TODO: Maybe use a better etag generator?
+    let etag = inner_meta.modified_date.map(|modified| {
+        let date = modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let mut hasher = DefaultHasher::new();
+        hasher.write_u128(date);
+        hasher.write(path.as_os_str().as_encoded_bytes());
+        hasher.finish().to_string()
+    });
+
     Metadata {
         creation_date: inner_meta.creation_date,
         modified_date: inner_meta.modified_date,
@@ -118,5 +132,6 @@ pub fn get_props(path: impl AsRef<Path>) -> Metadata {
             .and_then(OsStr::to_str)
             .map(ToOwned::to_owned),
         mime,
+        etag,
     }
 }

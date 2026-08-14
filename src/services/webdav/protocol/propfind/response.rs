@@ -75,7 +75,7 @@ impl Prop {
         if props.contains(super::request::Props::GET_ETAG) {
             out.push(Prop {
                 kind: PropKind::GetETag,
-                raw_value: None,
+                raw_value: meta.etag,
             });
         }
         if props.contains(super::request::Props::GET_LAST_MODIFIED) {

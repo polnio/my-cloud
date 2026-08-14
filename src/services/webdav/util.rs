@@ -5,14 +5,21 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub fn decode_uri(uri: &'_ str) -> Cow<'_, [u8]> {
+pub fn decode_uri(uri: &str) -> Cow<'_, [u8]> {
     let pcts = uri.chars().positions(|c| c == '%').collect_vec();
     if pcts.is_empty() {
         return Cow::Borrowed(uri.as_bytes());
     }
     let mut decoded = Vec::with_capacity(uri.len() - 2 * pcts.len());
     let mut uri = uri;
+    let mut last = None;
     for pct in pcts {
+        let old = last.replace(pct);
+        let pct = if let Some(old) = old {
+            pct - old - 3
+        } else {
+            pct
+        };
         let (before, after) = uri.split_at(pct);
         decoded.extend_from_slice(before.as_bytes());
         let part = &after[1..3];

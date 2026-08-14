@@ -192,6 +192,7 @@ async fn handle_put(
     if path.is_dir() {
         return StatusCode::BAD_REQUEST;
     }
+    let is_created = !path.exists();
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -199,13 +200,16 @@ async fn handle_put(
         .open(&path)
     {
         Ok(file) => file,
-        Err(err) => {
-            tracing::error!(
-                "Failed to create/open file {path:?}: {err}",
-                path = path.display()
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
+        Err(err) => match err.kind() {
+            std::io::ErrorKind::NotFound => return StatusCode::CONFLICT,
+            _ => {
+                tracing::error!(
+                    "Failed to create/open file {path:?}: {err}",
+                    path = path.display()
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        },
     };
     eprintln!("{:?}", String::from_utf8_lossy(&body));
     if let Err(err) = file.write_all(&body) {
@@ -215,7 +219,11 @@ async fn handle_put(
         );
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
-    StatusCode::OK
+    if is_created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    }
 }
 
 async fn handle_delete(
@@ -532,7 +540,6 @@ fn prepare_copy_move<'a>(
     if let Ok(uri) = &parse {
         dest = uri.path();
     }
-    eprintln!("{dest}");
     let Some((_, dest)) =
         auth::is_path_related_to_user(dest.as_ref(), auth.username(), &state.config)
     else {
