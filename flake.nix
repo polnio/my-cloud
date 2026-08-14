@@ -8,20 +8,8 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
-      devShells = forAllSystems (
-        system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-        in
-        {
-          default = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [
-              cargo
-              rustc
-              clippy
-            ];
-          };
-        }
-      );
+      packages = forAllSystems (import ./nix/packages.nix self);
+      devShells = forAllSystems (import ./nix/shells.nix self);
+      nixosModules = import ./nix/modules.nix self;
     };
 }
