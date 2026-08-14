@@ -284,38 +284,42 @@ async fn handle_copy(
         Err(status) => return status,
     };
     let result = if src_path.is_dir() {
-        let mut result = Ok(());
-        for entry in walkdir::WalkDir::new(&src_path) {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => {
-                    tracing::error!(
-                        "Failed to walk directory {src_path:?}: {err}",
-                        src_path = src_path.display()
-                    );
-                    if let Some(err) = err.into_io_error() {
-                        result = Err(err);
+        if headers.get("Depth").is_some_and(|h| h.as_bytes() == b"0") {
+            std::fs::create_dir(&dest_path)
+        } else {
+            let mut result = Ok(());
+            for entry in walkdir::WalkDir::new(&src_path) {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        tracing::error!(
+                            "Failed to walk directory {src_path:?}: {err}",
+                            src_path = src_path.display()
+                        );
+                        if let Some(err) = err.into_io_error() {
+                            result = Err(err);
+                        }
+                        break;
                     }
-                    break;
-                }
-            };
-            let path = entry.path();
-            let new_path = dest_path.join(path.strip_prefix(&src_path).unwrap());
-            if path.is_dir() {
-                if let Err(err) = std::fs::create_dir(new_path)
-                    && err.kind() != std::io::ErrorKind::NotFound
-                {
-                    result = Err(err);
-                    break;
-                }
-            } else {
-                if let Err(err) = std::fs::copy(path, new_path) {
-                    result = Err(err);
-                    break;
+                };
+                let path = entry.path();
+                let new_path = dest_path.join(path.strip_prefix(&src_path).unwrap());
+                if path.is_dir() {
+                    if let Err(err) = std::fs::create_dir(new_path)
+                        && err.kind() != std::io::ErrorKind::NotFound
+                    {
+                        result = Err(err);
+                        break;
+                    }
+                } else {
+                    if let Err(err) = std::fs::copy(path, new_path) {
+                        result = Err(err);
+                        break;
+                    }
                 }
             }
+            result
         }
-        result
     } else {
         std::fs::copy(&src_path, &dest_path).map(|_| ())
     };
@@ -541,7 +545,6 @@ fn prepare_copy_move<'a>(
     if src_path.is_file() && dest_path.is_dir() {
         dest_path = dest_path.join(src_path.file_name().unwrap());
     }
-    dbg!(&src_path, &dest_path);
     if path_depth(&src_path, &state.config) < 2 {
         return Err(StatusCode::FORBIDDEN);
     }
