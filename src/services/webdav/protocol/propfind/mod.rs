@@ -83,6 +83,10 @@ impl Metadata {
     pub fn mime(&self) -> Option<&str> {
         self.mime.as_deref()
     }
+    #[allow(dead_code)]
+    pub fn etag(&self) -> Option<&str> {
+        self.etag.as_deref()
+    }
     pub fn set_is_root(&mut self) {
         self.display_name = None;
     }

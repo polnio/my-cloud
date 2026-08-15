@@ -500,6 +500,9 @@ fn set_headers(
                 .unwrap(),
         );
     }
+    if let Some(etag) = props.etag() {
+        headers.insert("ETag", etag.parse().unwrap());
+    }
     headers.insert(
         "Content-Type",
         props
