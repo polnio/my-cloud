@@ -8,7 +8,7 @@ pub struct Request {
 }
 
 bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Props: u8 {
         const CREATION_DATE      = 1 << 0;
         const DISPLAY_NAME       = 1 << 1;
@@ -17,6 +17,11 @@ bitflags::bitflags! {
         const GET_ETAG           = 1 << 4;
         const GET_LAST_MODIFIED  = 1 << 5;
         const RESOURCE_TYPE      = 1 << 6;
+    }
+}
+impl Default for Props {
+    fn default() -> Self {
+        Self::all()
     }
 }
 
