@@ -67,31 +67,11 @@ self: rec {
                   default = "/srv/my-cloud";
                 };
               };
-              users = mkOption {
-                type = attrsOf (submodule {
-                  options = {
-                    display_name = mkOption {
-                      type = nullOr str;
-                      default = null;
-                    };
-                    password_file = mkOption {
-                      type = str;
-                    };
-                  };
-                });
-              };
-              groups = mkOption {
-                type = attrsOf (submodule {
-                  options = {
-                    display_name = mkOption {
-                      type = nullOr str;
-                      default = null;
-                    };
-                    users = mkOption {
-                      type = listOf str;
-                    };
-                  };
-                });
+              database = {
+                url = mkOption {
+                  type = str;
+                  default = "sqlite:///var/lib/my-cloud/database.db";
+                };
               };
             };
           };

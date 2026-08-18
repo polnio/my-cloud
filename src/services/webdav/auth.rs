@@ -1,6 +1,4 @@
-use super::WebDavState;
-use crate::config::Config;
-use crate::state::State;
+use crate::state::{State, StateHandle};
 use axum::debug_middleware;
 use axum::extract::{FromRequestParts, Request};
 use axum::http::{HeaderValue, StatusCode};
@@ -8,24 +6,34 @@ use axum::middleware::Next;
 use axum::response::Response;
 use headers::authorization::Basic;
 use headers::{Authorization, HeaderMapExt as _};
-use std::borrow::Cow;
+use itertools::Itertools as _;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
-pub struct Auth(Authorization<Basic>);
+pub struct Auth {
+    header: Authorization<Basic>,
+    display_name: Option<String>,
+    groups: Vec<(String, Option<String>)>,
+}
 impl Auth {
     pub fn username(&self) -> &str {
-        self.0.username()
+        self.header.username()
+    }
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+    pub fn groups(&self) -> &[(String, Option<String>)] {
+        &self.groups
     }
 }
 
-impl FromRequestParts<WebDavState> for Auth {
+impl FromRequestParts<StateHandle> for Auth {
     type Rejection = StatusCode;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        state: &WebDavState,
+        state: &StateHandle,
     ) -> Result<Self, Self::Rejection> {
         let auth = parts
             .headers
@@ -34,43 +42,76 @@ impl FromRequestParts<WebDavState> for Auth {
         let username = auth.username();
         let password = auth.password();
 
-        {
-            let mut app_state = state.app_state.lock().await;
-            check_auth(&mut app_state, &state.config, username, password)?;
-        }
+        let display_name = check_auth(state, username, password).await?;
+
+        let groups = sqlx::query!(
+            "SELECT `group_id`, `display_name` FROM `user_group`
+            JOIN `group` ON `id` = `group_id`
+            WHERE `user_id` = ?",
+            username
+        )
+        .fetch_all(&*state.database)
+        .await
+        .unwrap_or_else(|err| {
+            tracing::error!("Failed to fetch groups: {err}");
+            Default::default()
+        });
+        let groups = groups
+            .into_iter()
+            .map(|g| (g.group_id, g.display_name))
+            .collect_vec();
+        let auth = Self {
+            header: auth,
+            display_name,
+            groups,
+        };
 
         let path = super::util::decode_uri(parts.uri.path());
         // TODO: Support non-Unix platforms
         let path = Path::new(OsStr::from_bytes(path.as_ref()));
-        if is_path_related_to_user(path, username, &state.config).is_none() {
+        if is_path_related_to_user(path, &auth).is_none() {
             if parts.method == axum::http::method::Method::PUT {
                 return Err(StatusCode::CONFLICT);
             }
             return Err(StatusCode::NOT_FOUND);
         }
 
-        Ok(Self(auth))
+        Ok(auth)
     }
 }
 
-fn check_auth(
-    app_state: &mut State,
-    config: &Config,
+async fn check_auth(
+    state: &State,
     username: &str,
     password: &str,
-) -> Result<(), StatusCode> {
-    if app_state.creds.get(username).map(|s| s.as_str()) == Some(password) {
-        return Ok(());
+) -> Result<Option<String>, StatusCode> {
+    let mut creds = state.creds.lock().await;
+    if let Some((pwd, dn)) = creds.get(username)
+        && pwd == password
+    {
+        return Ok(dn.clone());
     }
-    let Some(password_file) = config.users.get(username).map(|u| &u.password_file) else {
-        return Err(StatusCode::UNAUTHORIZED);
+    let user = sqlx::query!(
+        "SELECT `password_hash`, `display_name` FROM `user` WHERE `id` = ?",
+        username
+    )
+    .fetch_optional(&*state.database)
+    .await;
+    let user = match user {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(StatusCode::UNAUTHORIZED),
+        Err(err) => {
+            tracing::error!("Failed to fetch user: {err}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
     };
-    match crate::auth::verify_password(password, password_file) {
+    match crate::auth::verify_password(password, &user.password_hash) {
         Ok(true) => {
-            app_state
-                .creds
-                .insert(username.to_owned(), password.to_owned());
-            Ok(())
+            creds.insert(
+                username.to_owned(),
+                (password.to_owned(), user.display_name.clone()),
+            );
+            Ok(user.display_name)
         }
         Ok(false) => Err(StatusCode::UNAUTHORIZED),
         // TODO: Handle error
@@ -91,53 +132,39 @@ pub async fn handle_unauthenticated(req: Request, next: Next) -> Response {
     response
 }
 
-pub fn is_path_related_to_user<'a, 'b>(
-    path: &'a Path,
-    username: &'b str,
-    config: &'b Config,
-) -> Option<(Option<&'b str>, Cow<'a, Path>)> {
+pub enum Principal<'a> {
+    Root,
+    User(&'a str),
+    Group(&'a str),
+}
+impl<'a> Principal<'a> {
+    pub fn display_name<'b>(
+        &self,
+        user: (&'b str, &'b str),
+        groups: impl IntoIterator<Item = (&'b str, &'b str)>,
+    ) -> Option<&'b str> {
+        match self {
+            Self::Root => None,
+            Self::User(username) => (*username == user.0).then_some(user.1),
+            Self::Group(group_id) => groups
+                .into_iter()
+                .find_map(|(gid, name)| (*group_id == gid).then_some(name)),
+        }
+    }
+}
+
+pub fn is_path_related_to_user<'a>(path: &Path, auth: &'a Auth) -> Option<Principal<'a>> {
     let mut parts = path.iter().skip(1); // Skip the root directory
     let Some(home) = parts.next() else {
         // This is the root directory
-        return Some((None, Cow::Borrowed(path)));
+        return Some(Principal::Root);
     };
+    let username = auth.username();
     if home == username {
-        let name = config.users[username]
-            .display_name
-            .as_deref()
-            .unwrap_or(username);
-        return Some((Some(name), Cow::Borrowed(path)));
-    }
-    if let Some(name) = config.users[username].display_name.as_deref()
-        && name == home
-    {
-        return Some((
-            Some(name),
-            Cow::Owned(super::util::replace_path_component(path, 1, username)),
-        ));
+        return Some(Principal::User(username));
     }
 
-    let result = config.groups.iter().find_map(|(gid, g)| {
-        if gid.as_str() == home {
-            Some((true, gid, g))
-        } else if g.display_name.as_ref().is_some_and(|n| n.as_str() == home) {
-            Some((false, gid, g))
-        } else {
-            None
-        }
-    });
-    if let Some((is_id, gid, group)) = result
-        && group.users.iter().any(|u| u == username)
-    {
-        let name = group.display_name.as_deref().unwrap_or(gid.as_str());
-        if is_id {
-            return Some((Some(name), Cow::Borrowed(path)));
-        } else {
-            return Some((
-                Some(name),
-                Cow::Owned(super::util::replace_path_component(path, 1, gid)),
-            ));
-        }
-    }
-    None
+    auth.groups
+        .iter()
+        .find_map(|(gid, _)| (gid.as_str() == home).then_some(Principal::Group(gid)))
 }

@@ -1,12 +1,13 @@
 mod args;
 mod auth;
 mod config;
+mod database;
 mod services;
 mod state;
 
 use crate::args::Args;
 use crate::config::Config;
-use crate::state::StateHandle;
+use crate::state::State;
 use anyhow::Context as _;
 use std::sync::Arc;
 use tokio::select;
@@ -40,11 +41,11 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to find config path")?;
         Config::parse(&path).context("Failed to parse config")?
     };
-    let config = Arc::new(config);
-    let state = StateHandle::default();
+    let state = State::new(config).await?;
+    let state = Arc::new(state);
 
     #[cfg(feature = "webdav")]
-    let webdav = services::webdav::serve(config, state);
+    let webdav = services::webdav::serve(state);
     #[cfg(not(feature = "webdav"))]
     let webdav = std::future::pending::<anyhow::Result<()>>();
 

@@ -1,9 +1,5 @@
 use itertools::Itertools as _;
-use std::{
-    borrow::Cow,
-    ffi::OsStr,
-    path::{Component, Path, PathBuf},
-};
+use std::borrow::Cow;
 
 pub fn decode_uri(uri: &str) -> Cow<'_, [u8]> {
     let pcts = uri.chars().positions(|c| c == '%').collect_vec();
@@ -51,22 +47,4 @@ pub fn encode_uri(uri: &'_ str, encode_slashes: bool) -> String {
         }
     }
     encoded
-}
-
-pub fn replace_path_component(
-    path: impl AsRef<Path>,
-    index: usize,
-    new_component: impl AsRef<OsStr>,
-) -> PathBuf {
-    path.as_ref()
-        .components()
-        .enumerate()
-        .map(|(i, component)| {
-            if i == index {
-                Component::Normal(new_component.as_ref())
-            } else {
-                component
-            }
-        })
-        .collect()
 }

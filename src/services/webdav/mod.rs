@@ -13,11 +13,12 @@ use axum::middleware::{Next, from_fn};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, debug_middleware};
 use dispatcher::Dispatcher;
+use futures_util::StreamExt as _;
 use itertools::Itertools as _;
 use std::borrow::Cow;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 use tower::ServiceBuilder;
@@ -25,19 +26,56 @@ use tower_http::trace::TraceLayer;
 
 const NGX_HTTP_AUTOINDEX_NAME_LEN: usize = 50;
 
-pub async fn serve(config: Arc<Config>, state: StateHandle) -> std::io::Result<()> {
-    std::fs::create_dir_all(&config.webdav.root)?;
-    for id in config.users.keys() {
-        std::fs::create_dir_all(config.webdav.root.join(id))?;
+pub async fn init(state: &crate::State) {
+    if let Err(err) = std::fs::create_dir_all(&state.config.webdav.root) {
+        tracing::error!("Failed to create directory: {err}");
+        return;
     }
-    for id in config.groups.keys() {
-        std::fs::create_dir_all(config.webdav.root.join(id))?;
+    let mut users = sqlx::query!("SELECT `id` FROM `user`").fetch(&*state.database);
+    let mut groups = sqlx::query!("SELECT `id` FROM `group`").fetch(&*state.database);
+    let mut users_finished = false;
+    let mut groups_finished = false;
+    loop {
+        tokio::select! {
+            result = users.next(), if !users_finished => match result {
+                Some(user) => {
+                    let user = match user {
+                        Ok(user) => user,
+                        Err(err) => {
+                            tracing::error!("Failed to fetch user: {err}");
+                            return;
+                        }
+                    };
+                    if let Err(err) = std::fs::create_dir_all(state.config.webdav.root.join(user.id)) {
+                        tracing::error!("Failed to create directory: {err}");
+                    }
+                },
+                None => users_finished = true
+            },
+            result = groups.next(), if !groups_finished => match result {
+                Some(group) => {
+                    let group = match group {
+                        Ok(group) => group,
+                        Err(err) => {
+                            tracing::error!("Failed to fetch group: {err}");
+                            return;
+                        }
+                    };
+                    if let Err(err) = std::fs::create_dir_all(state.config.webdav.root.join(group.id)) {
+                        tracing::error!("Failed to create directory: {err}");
+                    }
+                },
+                None => groups_finished = true
+            },
+        }
+        if users_finished && groups_finished {
+            break;
+        }
     }
+}
 
-    let state = WebDavState {
-        app_state: state,
-        config: config.clone(),
-    };
+pub async fn serve(state: StateHandle) -> anyhow::Result<()> {
+    init(&state).await;
 
     let router = Dispatcher::new()
         .get(handle_get)
@@ -48,23 +86,64 @@ pub async fn serve(config: Arc<Config>, state: StateHandle) -> std::io::Result<(
         .copy(handle_copy)
         .r#move(handle_move)
         .propfind(handle_propfind)
-        .options(handle_options)
-        .dispatch();
+        .options(handle_options);
+
+    let root_router = router.clone().get(handle_get_root);
+
     let app = Router::new()
-        .route("/", router.clone())
-        .route("/{*path}", router)
+        .route("/", root_router.dispatch())
+        .route("/{*path}", router.dispatch())
         .layer(from_fn(handle_unauthenticated))
         .layer(from_fn(handle_response_headers))
         .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
-        .with_state(state);
+        .with_state(state.clone());
 
-    let listener = TcpListener::bind((config.webdav.host.as_str(), config.webdav.port)).await?;
-    axum::serve(listener, app).await
+    let listener =
+        TcpListener::bind((state.config.webdav.host.as_str(), state.config.webdav.port)).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn handle_get_root(State(state): State<StateHandle>, auth: Auth) -> Response {
+    let username = auth.username();
+    let display_name = auth.display_name();
+    // TODO: assert the folder exists
+    let time = state
+        .config
+        .webdav
+        .root
+        .join(username)
+        .metadata()
+        .unwrap()
+        .modified()
+        .unwrap();
+    let groups = auth.groups().iter().map(|(id, name)| {
+        let time = state
+            .config
+            .webdav
+            .root
+            .join(username)
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap();
+        (
+            true,
+            id.as_str(),
+            name.as_deref().unwrap_or(id.as_str()),
+            time,
+        )
+    });
+    let entries = std::iter::chain(
+        std::iter::once((true, username, display_name.unwrap_or(username), time)),
+        groups,
+    );
+    render_get_dir("/".as_ref(), entries)
 }
 
 async fn handle_get(
-    State(state): State<WebDavState>,
-    auth: Auth,
+    State(state): State<StateHandle>,
+    _auth: Auth,
     opath: Option<Path<String>>,
 ) -> Response {
     let path = get_real_path(opath, &state.config);
@@ -84,83 +163,39 @@ async fn handle_get(
         // https://github.com/nginx/nginx/blob/master/src/http/modules/ngx_http_autoindex_module.c
         let rel_path =
             PathBuf::from("/").join(path.strip_prefix(&state.config.webdav.root).unwrap());
-        let is_root = rel_path.parent().is_none();
-        let dpath = rel_path.to_string_lossy();
         let entries = match std::fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(err) => {
-                tracing::error!("Failed to read directory {dpath}: {err}");
+                tracing::error!("Failed to read directory {}: {}", rel_path.display(), err);
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
-        let mut body = format!(
-            r#"<html><head><title>Index of {dpath}</title></head><body><h1>Index of {dpath}</h1><hr><pre><a href="../">../</a>"#
-        );
-        for entry in entries {
+        let entries = entries.filter_map(|entry| {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    tracing::error!("Failed to read directory entry {dpath}: {err}");
-                    continue;
-                }
-            };
-            let mut file_name = entry.file_name();
-            let href = util::encode_uri(&file_name.to_string_lossy(), true);
-            let rel_path = rel_path.join(&file_name);
-            let Some((dn, _)) =
-                auth::is_path_related_to_user(&rel_path, auth.username(), &state.config)
-            else {
-                continue;
-            };
-            if is_root {
-                file_name = dn.unwrap().into();
-            }
-            let time = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|date| chrono::DateTime::<chrono::Utc>::from(date).to_rfc2822());
-            let time = match time {
-                Ok(time) => time,
-                Err(err) => {
-                    tracing::error!("Failed to get modification time for {dpath}: {err}");
-                    continue;
+                    tracing::error!(
+                        "Failed to read directory entry {}: {}",
+                        rel_path.display(),
+                        err
+                    );
+                    return None;
                 }
             };
             let is_dir = entry.path().is_dir();
-            let name = file_name.to_string_lossy();
-            body.push_str("\n<a href=\"");
-            body.push_str(&href);
-            if is_dir {
-                body.push('/');
-            }
-            body.push('"');
-            body.push('>');
-            // TODO: Escape HTML
-            if name.len() > NGX_HTTP_AUTOINDEX_NAME_LEN {
-                body.push_str(&name[..NGX_HTTP_AUTOINDEX_NAME_LEN]);
-                body.push_str("..&gt;</a>");
-            } else {
-                body.push_str(&name);
-                if is_dir {
-                    body.push('/');
-                }
-                body.push_str("</a>");
-                for _ in name.len()..NGX_HTTP_AUTOINDEX_NAME_LEN {
-                    body.push(' ');
-                }
-            }
-            body.push(' ');
-            body.push_str(&time);
-        }
-        body.push_str("\n</pre><hr></body></html>");
-        (StatusCode::OK, axum::response::Html(body)).into_response()
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let href = name.clone();
+            let time = entry.metadata().and_then(|m| m.modified()).ok()?;
+            Some((is_dir, href, name, time))
+        });
+        render_get_dir(&rel_path, entries)
     } else {
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     }
 }
 
 async fn handle_head(
-    State(state): State<WebDavState>,
+    State(state): State<StateHandle>,
     _auth: Auth,
     opath: Option<Path<String>>,
 ) -> Response {
@@ -180,7 +215,7 @@ async fn handle_head(
 }
 
 async fn handle_put(
-    State(state): State<WebDavState>,
+    State(state): State<StateHandle>,
     opath: Option<Path<String>>,
     _auth: Auth,
     body: Bytes,
@@ -227,7 +262,7 @@ async fn handle_put(
 }
 
 async fn handle_delete(
-    State(state): State<WebDavState>,
+    State(state): State<StateHandle>,
     _auth: Auth,
     opath: Option<Path<String>>,
 ) -> impl IntoResponse {
@@ -256,7 +291,7 @@ async fn handle_delete(
 }
 
 async fn handle_mkcol(
-    State(state): State<WebDavState>,
+    State(state): State<StateHandle>,
     _auth: Auth,
     opath: Option<Path<String>>,
 ) -> impl IntoResponse {
@@ -282,7 +317,7 @@ async fn handle_mkcol(
 }
 
 async fn handle_copy(
-    State(state): State<WebDavState>,
+    State(state): State<StateHandle>,
     auth: Auth,
     opath: Option<Path<String>>,
     headers: HeaderMap,
@@ -348,7 +383,7 @@ async fn handle_copy(
 }
 
 async fn handle_move(
-    State(state): State<WebDavState>,
+    State(state): State<StateHandle>,
     auth: Auth,
     opath: Option<Path<String>>,
     headers: HeaderMap,
@@ -376,7 +411,7 @@ async fn handle_move(
 }
 
 async fn handle_propfind(
-    State(state): State<WebDavState>,
+    State(state): State<StateHandle>,
     auth: Auth,
     headers: HeaderMap,
     opath: Option<Path<String>>,
@@ -426,16 +461,21 @@ async fn handle_propfind(
             let path = item.path();
             let rel_path =
                 PathBuf::from("/").join(path.strip_prefix(&state.config.webdav.root).unwrap());
-            let (dn, rel_path) =
-                auth::is_path_related_to_user(&rel_path, auth.username(), &state.config)?;
+            let principal = auth::is_path_related_to_user(&rel_path, &auth)?;
             let mut meta = protocol::propfind::get_props(path);
             if path == state.config.webdav.root {
                 meta.set_is_root();
             }
             if rel_path.parent().is_some_and(|p| p.parent().is_none()) {
-                meta.set_is_principal(dn.unwrap().to_owned());
+                let username = auth.username();
+                let user = (username, auth.display_name().unwrap_or(username));
+                let groups = auth
+                    .groups()
+                    .iter()
+                    .map(|(gid, name)| (gid.as_str(), name.as_deref().unwrap_or(gid)));
+                meta.set_is_principal(principal.display_name(user, groups).unwrap().to_owned());
             }
-            Some((rel_path.into_owned(), meta))
+            Some((rel_path, meta))
         })
         .collect_vec();
 
@@ -531,7 +571,7 @@ async fn handle_response_headers(req: Request, next: Next) -> Response {
 }
 
 fn prepare_copy_move<'a>(
-    state: &'a WebDavState,
+    state: &'a StateHandle,
     auth: &Auth,
     opath: Option<Path<String>>,
     headers: &HeaderMap,
@@ -543,9 +583,7 @@ fn prepare_copy_move<'a>(
     if let Ok(uri) = &parse {
         dest = uri.path();
     }
-    let Some((_, dest)) =
-        auth::is_path_related_to_user(dest.as_ref(), auth.username(), &state.config)
-    else {
+    if auth::is_path_related_to_user(dest.as_ref(), auth).is_none() {
         return Err(StatusCode::FORBIDDEN);
     };
     let dest = dest.strip_prefix("/").unwrap_or(dest.as_ref());
@@ -576,8 +614,42 @@ fn prepare_copy_move<'a>(
     Ok((src_path, dest_path))
 }
 
-#[derive(Clone)]
-struct WebDavState {
-    app_state: StateHandle,
-    config: Arc<Config>,
+fn render_get_dir(
+    rel_path: &std::path::Path,
+    entries: impl IntoIterator<Item = (bool, impl AsRef<str>, impl AsRef<str>, SystemTime)>,
+) -> Response {
+    let dpath = rel_path.to_string_lossy();
+    let mut body = format!(
+        r#"<html><head><title>Index of {dpath}</title></head><body><h1>Index of {dpath}</h1><hr><pre><a href="../">../</a>"#
+    );
+    for (is_dir, href, name, time) in entries {
+        let href = util::encode_uri(href.as_ref(), true);
+        let name = name.as_ref();
+        let time = chrono::DateTime::<chrono::Utc>::from(time).to_rfc2822();
+        body.push_str("\n<a href=\"");
+        body.push_str(&href);
+        if is_dir {
+            body.push('/');
+        }
+        body.push('"');
+        body.push('>');
+        // TODO: Escape HTML
+        if name.len() > NGX_HTTP_AUTOINDEX_NAME_LEN {
+            body.push_str(&name[..NGX_HTTP_AUTOINDEX_NAME_LEN]);
+            body.push_str("..&gt;</a>");
+        } else {
+            body.push_str(name);
+            if is_dir {
+                body.push('/');
+            }
+            body.push_str("</a>");
+            for _ in name.len()..NGX_HTTP_AUTOINDEX_NAME_LEN {
+                body.push(' ');
+            }
+        }
+        body.push(' ');
+        body.push_str(&time);
+    }
+    body.push_str("\n</pre><hr></body></html>");
+    (StatusCode::OK, axum::response::Html(body)).into_response()
 }
