@@ -18,7 +18,7 @@ use tracing_subscriber::FmtSubscriber;
 async fn main() -> anyhow::Result<()> {
     let result = tracing::subscriber::set_global_default(
         FmtSubscriber::builder()
-            .with_max_level(Level::DEBUG)
+            .with_max_level(Level::WARN)
             .finish(),
     )
     .context("Failed to set global default subscriber");

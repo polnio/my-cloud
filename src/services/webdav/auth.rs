@@ -1,3 +1,5 @@
+#[cfg(feature = "caldav")]
+use super::CALENDARS_PATH;
 use crate::state::{State, StateHandle};
 use axum::debug_middleware;
 use axum::extract::{FromRequestParts, Request};
@@ -72,6 +74,9 @@ impl FromRequestParts<StateHandle> for Auth {
         if is_path_related_to_user(path, &auth).is_none() {
             if parts.method == axum::http::method::Method::PUT {
                 return Err(StatusCode::CONFLICT);
+            }
+            if parts.method == "MKCOL" && path.iter().count() < 3 {
+                return Err(StatusCode::FORBIDDEN);
             }
             return Err(StatusCode::NOT_FOUND);
         }
@@ -153,18 +158,31 @@ impl<'a> Principal<'a> {
     }
 }
 
-pub fn is_path_related_to_user<'a>(path: &Path, auth: &'a Auth) -> Option<Principal<'a>> {
-    let mut parts = path.iter().skip(1); // Skip the root directory
+pub fn is_path_related_to_user<'a>(path: &Path, auth: &'a Auth) -> Option<(bool, Principal<'a>)> {
+    let ret = inner_is_path_related_to_user(path, auth, "/".as_ref());
+    #[cfg(feature = "caldav")]
+    let ret = ret.or_else(|| inner_is_path_related_to_user(path, auth, CALENDARS_PATH.as_ref()));
+    ret
+}
+
+fn inner_is_path_related_to_user<'a>(
+    path: &Path,
+    auth: &'a Auth,
+    root: &Path,
+) -> Option<(bool, Principal<'a>)> {
+    let sub_path = path.strip_prefix(root).ok()?;
+    let mut parts = sub_path.iter();
     let Some(home) = parts.next() else {
         // This is the root directory
-        return Some(Principal::Root);
+        return Some((false, Principal::Root));
     };
+    let is_principal = parts.next().is_none();
     let username = auth.username();
     if home == username {
-        return Some(Principal::User(username));
+        return Some((is_principal, Principal::User(username)));
     }
 
-    auth.groups
-        .iter()
-        .find_map(|(gid, _)| (gid.as_str() == home).then_some(Principal::Group(gid)))
+    auth.groups.iter().find_map(|(gid, _)| {
+        (gid.as_str() == home).then_some((is_principal, Principal::Group(gid)))
+    })
 }

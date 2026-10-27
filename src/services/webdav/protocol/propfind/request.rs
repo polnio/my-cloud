@@ -1,27 +1,20 @@
-use super::{Error, NS_DAV};
+use super::{Error, NS_DAV, Prop, Props};
 use std::io::Read;
 use xml::{EventReader, reader::XmlEvent};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub props: Props,
+    pub is_props_requested: bool,
 }
-
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Props: u8 {
-        const CREATION_DATE      = 1 << 0;
-        const DISPLAY_NAME       = 1 << 1;
-        const GET_CONTENT_LENGTH = 1 << 2;
-        const GET_CONTENT_TYPE   = 1 << 3;
-        const GET_ETAG           = 1 << 4;
-        const GET_LAST_MODIFIED  = 1 << 5;
-        const RESOURCE_TYPE      = 1 << 6;
-    }
-}
-impl Default for Props {
+impl Default for Request {
     fn default() -> Self {
-        Self::all()
+        let props = Prop::default_set();
+        let is_props_requested = false;
+        Self {
+            props,
+            is_props_requested,
+        }
     }
 }
 
@@ -72,23 +65,13 @@ impl Request {
                         // TODO: handle error
                         continue;
                     };
-                    if name.namespace.as_deref() != Some(NS_DAV) {
-                        // TODO: handle error
+                    let Some(ns) = name.namespace.as_deref() else {
+                        // todo: handle error
                         continue;
-                    }
-                    #[rustfmt::skip]
-                    match name.local_name.as_str() {
-                        "creationdate"     => props.insert(Props::CREATION_DATE),
-                        "displayname"      => props.insert(Props::DISPLAY_NAME),
-                        "getcontentlength" => props.insert(Props::GET_CONTENT_LENGTH),
-                        "getcontenttype"   => props.insert(Props::GET_CONTENT_TYPE),
-                        "getetag"          => props.insert(Props::GET_ETAG),
-                        "getlastmodified"  => props.insert(Props::GET_LAST_MODIFIED),
-                        "resourcetype"     => props.insert(Props::RESOURCE_TYPE),
-                        _ => {
-                            // TODO: handle error
-                        }
                     };
+                    if let Some(prop) = super::Prop::from_str(ns, &name.local_name) {
+                        props.insert(prop);
+                    }
                 }
                 ParseState::EndProp => {
                     expect_end_element(&event, "propfind").push_error(&mut errors);
@@ -104,7 +87,10 @@ impl Request {
             }
         }
         if errors.is_empty() {
-            Ok(Self { props })
+            Ok(Self {
+                props,
+                is_props_requested: true,
+            })
         } else {
             Err(errors)
         }
@@ -194,6 +180,7 @@ mod tests {
         "#;
         let expected = Request {
             props: Props::all(),
+            is_props_requested: true,
         };
         let cursor = Cursor::new(XML.trim());
         let result = Request::parse(cursor);

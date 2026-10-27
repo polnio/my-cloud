@@ -10,12 +10,14 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{Next, from_fn};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::any;
 use axum::{Router, debug_middleware};
 use dispatcher::Dispatcher;
 use futures_util::StreamExt as _;
 use itertools::Itertools as _;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -25,9 +27,20 @@ use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 const NGX_HTTP_AUTOINDEX_NAME_LEN: usize = 50;
+#[cfg(feature = "caldav")]
+const CALENDARS_PATH: &str = "/calendars";
+#[cfg(feature = "caldav")]
+const CALENDARS_PATH_NAME: &str = "calendars";
+
+const DEFAULT_CALENDAR_COLOR: &str = "#00f";
 
 pub async fn init(state: &crate::State) {
+    let calendar_path = state.config.webdav.root.join(CALENDARS_PATH_NAME);
     if let Err(err) = std::fs::create_dir_all(&state.config.webdav.root) {
+        tracing::error!("Failed to create directory: {err}");
+        return;
+    }
+    if let Err(err) = std::fs::create_dir_all(&calendar_path) {
         tracing::error!("Failed to create directory: {err}");
         return;
     }
@@ -46,8 +59,12 @@ pub async fn init(state: &crate::State) {
                             return;
                         }
                     };
-                    if let Err(err) = std::fs::create_dir_all(state.config.webdav.root.join(user.id)) {
+                    if let Err(err) = std::fs::create_dir_all(state.config.webdav.root.join(&user.id)) {
                         tracing::error!("Failed to create directory: {err}");
+                    }
+                    #[cfg(feature = "caldav")]
+                    if let Err(err) = std::fs::create_dir_all(calendar_path.join(user.id)) {
+                        tracing::error!("Failed to create calendar directory: {err}");
                     }
                 },
                 None => users_finished = true
@@ -93,6 +110,10 @@ pub async fn serve(state: StateHandle) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", root_router.dispatch())
         .route("/{*path}", router.dispatch())
+        .route(
+            "/.well-known/caldav",
+            any(|| async { Redirect::permanent(CALENDARS_PATH) }),
+        )
         .layer(from_fn(handle_unauthenticated))
         .layer(from_fn(handle_response_headers))
         .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
@@ -143,7 +164,7 @@ async fn handle_get_root(State(state): State<StateHandle>, auth: Auth) -> Respon
 
 async fn handle_get(
     State(state): State<StateHandle>,
-    _auth: Auth,
+    auth: Auth,
     opath: Option<Path<String>>,
 ) -> Response {
     let path = get_real_path(opath, &state.config);
@@ -152,7 +173,7 @@ async fn handle_get(
         Err(status) => return status.into_response(),
     };
     if meta.is_file() {
-        let props = protocol::propfind::get_props(&path);
+        let props = protocol::propfind::get_props(&path, auth.username());
         let mut headers = HeaderMap::new();
         let body = Body::from_stream(ReaderStream::new(
             tokio::fs::File::open(path.as_ref()).await.unwrap(),
@@ -196,7 +217,7 @@ async fn handle_get(
 
 async fn handle_head(
     State(state): State<StateHandle>,
-    _auth: Auth,
+    auth: Auth,
     opath: Option<Path<String>>,
 ) -> Response {
     let path = get_real_path(opath, &state.config);
@@ -205,7 +226,7 @@ async fn handle_head(
         Err(status) => return status.into_response(),
     };
     if meta.is_file() {
-        let props = protocol::propfind::get_props(&path);
+        let props = protocol::propfind::get_props(&path, auth.username());
         let mut headers = HeaderMap::new();
         set_headers(&meta, &props, &mut headers);
         (StatusCode::OK, headers).into_response()
@@ -246,7 +267,6 @@ async fn handle_put(
             }
         },
     };
-    eprintln!("{:?}", String::from_utf8_lossy(&body));
     if let Err(err) = file.write_all(&body) {
         tracing::error!(
             "Failed to write to file {path:?}: {err}",
@@ -417,9 +437,20 @@ async fn handle_propfind(
     opath: Option<Path<String>>,
     body: Bytes,
 ) -> Response {
+    let username = auth.username();
+    #[cfg(feature = "caldav")]
+    let cals = if let Some(opath) = opath.as_ref()
+        && opath.starts_with(CALENDARS_PATH_NAME)
+    {
+        fetch_cals(&state, username).await
+    } else {
+        Default::default()
+    };
     let path = get_real_path(opath, &state.config);
+    #[cfg(feature = "caldav")]
+    let is_root = path == state.config.webdav.root;
     let Ok(depth) = headers
-        .get("DEPTH")
+        .get("Depth")
         .map(|d| {
             d.to_str()
                 .map_err(|_| ())
@@ -429,6 +460,10 @@ async fn handle_propfind(
     else {
         return (StatusCode::BAD_REQUEST, "Invalid depth").into_response();
     };
+
+    // dbg!(&path, String::from_utf8_lossy(&body));
+    // eprintln!("Depth: {}", depth);
+    // eprintln!("{}", String::from_utf8_lossy(&body));
 
     let req = if body.is_empty() {
         Default::default()
@@ -461,25 +496,59 @@ async fn handle_propfind(
             let path = item.path();
             let rel_path =
                 PathBuf::from("/").join(path.strip_prefix(&state.config.webdav.root).unwrap());
-            let principal = auth::is_path_related_to_user(&rel_path, &auth)?;
-            let mut meta = protocol::propfind::get_props(path);
+            #[cfg(feature = "caldav")]
+            if is_root && *rel_path == *CALENDARS_PATH {
+                return None;
+            }
+            let (is_principal, principal) = auth::is_path_related_to_user(&rel_path, &auth)?;
+            #[cfg(feature = "caldav")]
+            let cal = if rel_path.starts_with(CALENDARS_PATH) && rel_path.iter().count() == 4 {
+                let name = rel_path.file_name().unwrap().to_string_lossy();
+                if let Some((display_name, color)) = cals.get(name.as_ref()) {
+                    Some((
+                        display_name.as_deref().map_or(name, Cow::Borrowed),
+                        color.clone(),
+                    ))
+                } else {
+                    Some((name, None))
+                }
+            } else {
+                None
+            };
+            let mut meta = protocol::propfind::get_props(path, username);
             if path == state.config.webdav.root {
                 meta.set_is_root();
             }
-            if rel_path.parent().is_some_and(|p| p.parent().is_none()) {
+            #[cfg(feature = "caldav")]
+            if let Some((name, color)) = cal {
+                meta.set_is_calendar(
+                    name.into_owned(),
+                    color.unwrap_or_else(|| DEFAULT_CALENDAR_COLOR.to_owned()),
+                );
+            }
+            match principal {
+                auth::Principal::Root => {}
+                auth::Principal::User(username) => meta.set_is_owner(username),
+                auth::Principal::Group(group) => meta.set_is_group(group),
+            }
+            if is_principal {
                 let username = auth.username();
                 let user = (username, auth.display_name().unwrap_or(username));
                 let groups = auth
                     .groups()
                     .iter()
                     .map(|(gid, name)| (gid.as_str(), name.as_deref().unwrap_or(gid)));
-                meta.set_is_principal(principal.display_name(user, groups).unwrap().to_owned());
+                meta.set_is_principal(
+                    username,
+                    principal.display_name(user, groups).unwrap().to_owned(),
+                );
             }
             Some((rel_path, meta))
         })
         .collect_vec();
+    let metas = metas.iter().map(|(path, meta)| (path.as_path(), meta));
 
-    let response = protocol::propfind::response::Response::from_metadata(metas, req.props);
+    let response = protocol::propfind::response::Response::from_metadata(metas, &req);
 
     let mut body = Vec::new();
     if let Err(err) = response.to_xml(&mut body) {
@@ -501,9 +570,13 @@ async fn handle_propfind(
 }
 
 async fn handle_options() -> impl IntoResponse {
+    #[cfg(feature = "caldav")]
+    const DAV_HEADER: &str = "1, calendar-access";
+    #[cfg(not(feature = "caldav"))]
+    const DAV_HEADER: &str = "1";
     (
         StatusCode::OK,
-        [("ALLOW", dispatcher::METHODS), ("DAV", "1")],
+        [("ALLOW", dispatcher::METHODS), ("DAV", DAV_HEADER)],
     )
 }
 
@@ -652,4 +725,27 @@ fn render_get_dir(
     }
     body.push_str("\n</pre><hr></body></html>");
     (StatusCode::OK, axum::response::Html(body)).into_response()
+}
+
+async fn fetch_cals(
+    state: &StateHandle,
+    username: &str,
+) -> HashMap<String, (Option<String>, Option<String>)> {
+    let mut stream = sqlx::query!(
+        "SELECT `id`, `display_name`, `color` FROM `calendar` where `user_id` = ?",
+        username
+    )
+    .fetch(&*state.database);
+    let mut cals = HashMap::new();
+    while let Some(cal) = stream.next().await {
+        let cal = match cal {
+            Ok(cal) => cal,
+            Err(err) => {
+                tracing::error!("Failed to fetch calendar: {err}");
+                continue;
+            }
+        };
+        cals.insert(cal.id, (cal.display_name, cal.color));
+    }
+    cals
 }
