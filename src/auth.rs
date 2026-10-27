@@ -7,7 +7,7 @@ pub fn verify_password(password: &str, expected: &str) -> anyhow::Result<bool> {
     let argon2 = Argon2::default();
     match argon2.verify_password(password.as_bytes(), &hash) {
         Ok(_) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(argon2::password_hash::Error::PasswordInvalid) => Ok(false),
         Err(err) => Err(err.into()),
     }
 }
