@@ -9,6 +9,7 @@ use crate::args::Args;
 use crate::config::Config;
 use crate::state::State;
 use anyhow::Context as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::select;
 use tracing::Level;
@@ -30,14 +31,8 @@ async fn main() -> anyhow::Result<()> {
     let config = {
         let path = args
             .config
-            .or_else(|| {
-                dirs::config_dir().map(|p| {
-                    p.join("my-cloud")
-                        .join("config.toml")
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            })
+            .map(PathBuf::from)
+            .or_else(|| dirs::config_dir().map(|p| p.join("my-cloud").join("config.toml")))
             .context("Failed to find config path")?;
         Config::parse(&path).context("Failed to parse config")?
     };

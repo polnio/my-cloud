@@ -22,9 +22,9 @@ pub struct WebdavConfig {
 }
 
 impl Config {
-    pub fn parse(path: &str) -> Result<Self, ConfigError> {
+    pub fn parse(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
         config::Config::builder()
-            .add_source(config::File::with_name(path))
+            .add_source(config::File::from(path.into()))
             .add_source(config::Environment::with_prefix("MY_CLOUD"))
             .build()?
             .try_deserialize()
