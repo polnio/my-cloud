@@ -9,5 +9,8 @@ in
       rustc
       clippy
     ];
+    shellHook = ''
+      export DATABASE_URL=sqlite://$PWD/database.db
+    '';
   };
 }
